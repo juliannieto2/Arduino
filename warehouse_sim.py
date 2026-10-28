@@ -39,9 +39,6 @@ FONT_TERM = pygame.font.SysFont("Consolas", 12)
 SCREEN_WIDTH = 1200
 SCREEN_HEIGHT = 750
 
-class UIElement:
-    pass
-
 class Button:
     def __init__(self, x: int, y: int, w: int, h: int, text: str, bg_color=ACCENT_BLUE, text_color=(255, 255, 255)):
         self.rect = pygame.Rect(x, y, w, h)
@@ -83,7 +80,7 @@ class WarehouseSimulator:
         self.target_sud = None
         self.target_level = None
 
-        # Robot State Machine
+        # Robot State Machine with Waypoint Pathfinding
         # States: IDLE, MOVING_TO_AISLE, MOVING_IN_AISLE, ELEVATING, PICKING, LOWERING, RETURNING_AISLE, RETURNING_CORRIDOR
         self.robot_state = "IDLE"
         self.robot_speed = 4.0
@@ -103,10 +100,10 @@ class WarehouseSimulator:
         self.setup_ui()
 
     def setup_geometry(self):
-        # Canvas dimensions: 750 x 710 on left
+        # Canvas dimensions
         self.map_rect = pygame.Rect(15, 15, 750, 720)
 
-        # Main corridor at bottom: y = 600 to 670
+        # Main corridor at bottom: strictly y = 635
         self.main_corridor_y = 635
         self.salida_x = 75
         self.salida_y = self.main_corridor_y
@@ -115,7 +112,7 @@ class WarehouseSimulator:
         self.robot_x = float(self.salida_x)
         self.robot_y = float(self.salida_y)
 
-        # Aisles x positions
+        # Aisles x center axis positions
         self.aisle_x = {
             "Pasillo A": 160,
             "Pasillo B": 280,
@@ -125,10 +122,10 @@ class WarehouseSimulator:
         }
 
         # Satellite positions calculations (Sud 1 to 63)
-        # Depth index 1 is closest to main corridor (bottom, y ~ 560)
-        # Depth index 9 is furthest top (y ~ 80)
+        # Depth index 1 is closest to main corridor (bottom y = 540)
+        # Depth index 9 is furthest top (y = 100)
         self.sud_rects: Dict[int, pygame.Rect] = {}
-        self.sud_coords: Dict[int, Tuple[int, int]] = {}  # robot stop coords in front of Sud
+        self.sud_coords: Dict[int, Tuple[int, int]] = {}  # Exact stop coordinate in front of rack cell
 
         slot_w = 40
         slot_h = 45
@@ -140,7 +137,7 @@ class WarehouseSimulator:
             depth = info["depth_index"]
 
             ax = self.aisle_x[aisle]
-            # y coordinate: depth 1 -> bottom y=540, depth 9 -> top y=80
+            # y coordinate: depth 1 -> bottom y=540, depth 9 -> top y=100
             y_pos = 540 - (depth - 1) * 55
 
             if side == "left":
@@ -151,13 +148,11 @@ class WarehouseSimulator:
             rect = pygame.Rect(rx, y_pos, slot_w, slot_h)
             self.sud_rects[sud_id] = rect
 
-            # Stop coord in aisle in front of this rack position
+            # Stop coord in aisle center axis aligned precisely with middle of this Sud cell
             self.sud_coords[sud_id] = (ax, y_pos + slot_h // 2)
 
     def setup_ui(self):
-        # UI controls on right panel (x = 780 to 1180)
         px = 785
-
         self.btn_sud_dec = Button(px, 140, 45, 35, "-1", ACCENT_BLUE)
         self.btn_sud_inc = Button(px + 175, 140, 45, 35, "+1", ACCENT_BLUE)
         self.btn_sud_quick14 = Button(px + 230, 140, 75, 35, "Sud 14", ACCENT_ORANGE)
@@ -195,33 +190,34 @@ class WarehouseSimulator:
         target_aisle_x = self.aisle_x[info["aisle"]] if info else self.salida_x
         target_sud_x, target_sud_y = self.sud_coords[self.target_sud] if self.target_sud else (self.salida_x, self.salida_y)
 
+        # Waypoint 1: Horizontal transit strictly along Main Corridor (y = main_corridor_y) to Target Aisle Axis
         if self.robot_state == "MOVING_TO_AISLE":
-            # Move along main corridor y=main_corridor_y to target_aisle_x
+            self.robot_y = float(self.main_corridor_y) # Lock Y coordinate
             dx = target_aisle_x - self.robot_x
             if abs(dx) <= self.robot_speed:
-                self.robot_x = target_aisle_x
+                self.robot_x = float(target_aisle_x)
                 self.robot_state = "MOVING_IN_AISLE"
-                self.add_log(f"[ARDUINO] GIRANDO: Entrando a {info['aisle']}...")
+                self.add_log(f"[ARDUINO] WAYPOINT 1 ALCANZADO | Entrando a {info['aisle']} por eje central...")
             else:
                 self.robot_x += math.copysign(self.robot_speed, dx)
 
+        # Waypoint 2: Vertical transit along Target Aisle Center Axis to Target Sud Y Coordinate
         elif self.robot_state == "MOVING_IN_AISLE":
-            # Move along aisle x=target_aisle_x to target_sud_y
+            self.robot_x = float(target_aisle_x) # Lock X coordinate to aisle center
             dy = target_sud_y - self.robot_y
             if abs(dy) <= self.robot_speed:
-                self.robot_y = target_sud_y
+                self.robot_y = float(target_sud_y)
                 self.robot_state = "ELEVATING"
                 self.actuator_target = float(self.target_level)
-                self.add_log(f"[ARDUINO] POSICIONADO en Sud {self.target_sud}. Elevando actuador a Nivel {self.target_level:02d}...")
+                self.add_log(f"[ARDUINO] WAYPOINT 2 ALCANZADO: Posicionado en Sud {self.target_sud}. Elevando actuador a Nivel {self.target_level:02d}...")
             else:
                 self.robot_y += math.copysign(self.robot_speed, dy)
 
         elif self.robot_state == "ELEVATING":
-            # Elevate actuator to target level
             if abs(self.actuator_level - self.actuator_target) <= self.actuator_speed:
                 self.actuator_level = self.actuator_target
                 self.robot_state = "PICKING"
-                self.state_timer = 40  # 40 frames delay for picking animation
+                self.state_timer = 40
                 self.add_log(f"[ARDUINO] ACTUADOR EN NIVEL {self.target_level:02d}. Ejecutando extracción de pieza...")
             else:
                 self.actuator_level += math.copysign(self.actuator_speed, self.actuator_target - self.actuator_level)
@@ -237,27 +233,29 @@ class WarehouseSimulator:
             if abs(self.actuator_level - self.actuator_target) <= self.actuator_speed:
                 self.actuator_level = 1.0
                 self.robot_state = "RETURNING_AISLE"
-                self.add_log(f"[ARDUINO] RETORNO: Iniciando movimiento de salida de pasillo...")
+                self.add_log(f"[ARDUINO] RETORNO: Descendiendo por pasillo central...")
             else:
                 self.actuator_level += math.copysign(self.actuator_speed, self.actuator_target - self.actuator_level)
 
+        # Waypoint 4: Return vertically down Target Aisle Axis to Main Corridor
         elif self.robot_state == "RETURNING_AISLE":
-            # Return down aisle to main corridor y=main_corridor_y
+            self.robot_x = float(target_aisle_x) # Lock X coordinate
             dy = self.main_corridor_y - self.robot_y
             if abs(dy) <= self.robot_speed:
-                self.robot_y = self.main_corridor_y
+                self.robot_y = float(self.main_corridor_y)
                 self.robot_state = "RETURNING_CORRIDOR"
-                self.add_log(f"[ARDUINO] Retornando por pasillo principal hacia SALIDA...")
+                self.add_log(f"[ARDUINO] WAYPOINT 4 ALCANZADO | En pasillo principal rumbo a SALIDA...")
             else:
                 self.robot_y += math.copysign(self.robot_speed, dy)
 
+        # Waypoint 5: Return horizontally along Main Corridor to SALIDA Station
         elif self.robot_state == "RETURNING_CORRIDOR":
-            # Return along main corridor to salida_x
+            self.robot_y = float(self.main_corridor_y) # Lock Y coordinate
             dx = self.salida_x - self.robot_x
             if abs(dx) <= self.robot_speed:
-                self.robot_x = self.salida_x
+                self.robot_x = float(self.salida_x)
                 self.robot_state = "IDLE"
-                self.add_log(f"[ARDUINO] LLEGADA A SALIDA: Pedido Sud {self.target_sud} completado. Robot en REPOSO.")
+                self.add_log(f"[ARDUINO] WAYPOINT 5 ALCANZADO: LLEGADA A SALIDA. Pedido Sud {self.target_sud} completado.")
             else:
                 self.robot_x += math.copysign(self.robot_speed, dx)
 
@@ -356,7 +354,6 @@ class WarehouseSimulator:
         pygame.draw.rect(self.screen, (40, 40, 40), (rx + rw//2 - 1, ry + 4, 4, 8))
 
         # Actuator Level Visualizer (vertical mast elevation indicator)
-        # Mast height grows when level increases to 2
         mast_height = int(10 * self.actuator_level)
         pygame.draw.rect(self.screen, (241, 196, 15), (rx - 4, ry - mast_height - 2, 8, mast_height), border_radius=2)
 
@@ -501,14 +498,10 @@ class WarehouseSimulator:
         pygame.quit()
 
     def run_headless_simulation(self, output_image_path: str = "warehouse_sim.png"):
-        """
-        Runs headless simulation steps and saves screenshot verification image.
-        """
         self.selected_sud = 14
         self.selected_level = 2
         self.start_picking()
 
-        # Run several frames to animate robot moving into aisle B and picking
         for step in range(250):
             self.update_robot()
             self.screen.fill(BG_COLOR)

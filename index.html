@@ -128,10 +128,11 @@
       const [mode, setMode] = useState("AUTOMATIC"); // AUTOMATIC or MANUAL
       const [robotState, setRobotState] = useState("IDLE"); // IDLE, MOVING_X, MOVING_Y, ELEVATING, PICKING, LOWERING, RETURNING_Y, RETURNING_X, PAUSED
       const [isPaused, setIsPaused] = useState(false);
+      const [pickingTimer, setPickingTimer] = useState(0);
 
       // Robot positional state (percentages 0-100 on 2D canvas)
-      // Home / SALIDA is at bottom-left: x = 12%, y = 88%
-      const SALIDA_POS = { x: 12, y: 88 };
+      // Home / SALIDA is at bottom-left: x = 12%, y = 91%
+      const SALIDA_POS = { x: 12, y: 91 };
       const [robotPos, setRobotPos] = useState(SALIDA_POS);
       const [actuatorLevel, setActuatorLevel] = useState(1.0); // 1.0 (Level 01) to 2.0 (Level 02)
 
@@ -166,7 +167,7 @@
         }
       }, [logs]);
 
-      // Aisle X coordinates on canvas (%)
+      // Aisle X center axis coordinates on canvas (%)
       const aisleXCoords = {
         "Pasillo A": 22,
         "Pasillo B": 38,
@@ -175,9 +176,9 @@
         "Pasillo E": 86
       };
 
-      // Get Y position (%) for a given Sud depth (depth 1 bottom y=76%, depth 9 top y=12%)
+      // Get Y position (%) for a given Sud depth (depth 1 bottom y=78%, depth 9 top y=12%)
       const getSudYCoord = (depth) => {
-        return 76 - (depth - 1) * 7.5;
+        return 78 - (depth - 1) * 8.2;
       };
 
       // Start Picking command
@@ -187,6 +188,7 @@
         const targetInfo = getSudInfo(sud);
         setActiveJob({ sud, level, info: targetInfo });
         setIsPaused(false);
+        setPickingTimer(0);
         setRobotState("MOVING_X");
 
         addLog("ARDUINO_TX", `CMD_START_PICK | DEST:SUD_${sud} | AISLE:${targetInfo.aisle.toUpperCase().replace(' ', '_')} | LEVEL:${level}`);
@@ -210,6 +212,7 @@
         setRobotState("IDLE");
         setIsPaused(false);
         setActiveJob(null);
+        setPickingTimer(0);
         addLog("ARDUINO_TX", "CMD_EMERGENCY_RESET -> RETURN_HOME_SALIDA");
       };
 
@@ -220,7 +223,7 @@
         addLog("SYSTEM", `ORDER_QUEUED: Sud ${randSud} (Nivel ${randLevel})`);
       };
 
-      // Frame animation loop
+      // Frame animation loop with strict Waypoint Routing (Zero Collision)
       useEffect(() => {
         if (isPaused || robotState === "IDLE" || !activeJob) return;
 
@@ -232,39 +235,53 @@
           setRobotPos(prev => {
             let { x, y } = prev;
 
+            // WAYPOINT 1: Horizontal transit along Main Corridor (y=91%) to Target Aisle Center
             if (robotState === "MOVING_X") {
               if (Math.abs(x - targetAisleX) <= speed) {
                 x = targetAisleX;
+                y = SALIDA_POS.y;
                 setRobotState("MOVING_Y");
-                addLog("ARDUINO_RX", `MOV_X_COMPLETE | TURN_INTO_${activeJob.info.aisle.toUpperCase().replace(' ', '_')}`);
+                addLog("ARDUINO_RX", `WAYPOINT_1_REACHED | TURN_INTO_${activeJob.info.aisle.toUpperCase().replace(' ', '_')}`);
               } else {
                 x += Math.sign(targetAisleX - x) * speed;
+                y = SALIDA_POS.y;
               }
-            } else if (robotState === "MOVING_Y") {
+            }
+            // WAYPOINT 2: Vertical transit along Target Aisle Center Axis to Target Sud Y Coordinate
+            else if (robotState === "MOVING_Y") {
               if (Math.abs(y - targetSudY) <= speed) {
+                x = targetAisleX;
                 y = targetSudY;
                 setRobotState("ELEVATING");
-                addLog("ARDUINO_RX", `POS_REACHED: SUD_${activeJob.sud} | ELEVATING_FORK`);
+                addLog("ARDUINO_RX", `WAYPOINT_2_REACHED: SUD_${activeJob.sud} (DEPTH ${activeJob.info.depth}) | ELEVATING_FORK`);
               } else {
+                x = targetAisleX;
                 y += Math.sign(targetSudY - y) * speed;
               }
-            } else if (robotState === "RETURNING_Y") {
+            }
+            // WAYPOINT 4: Return vertically down Aisle Center Axis to Main Corridor (y=91%)
+            else if (robotState === "RETURNING_Y") {
               if (Math.abs(y - SALIDA_POS.y) <= speed) {
+                x = targetAisleX;
                 y = SALIDA_POS.y;
                 setRobotState("RETURNING_X");
-                addLog("ARDUINO_RX", `EXIT_AISLE -> ENTER_MAIN_CORRIDOR`);
+                addLog("ARDUINO_RX", `WAYPOINT_4_REACHED | EXIT_AISLE -> MAIN_CORRIDOR`);
               } else {
+                x = targetAisleX;
                 y += Math.sign(SALIDA_POS.y - y) * speed;
               }
-            } else if (robotState === "RETURNING_X") {
+            }
+            // WAYPOINT 5: Return horizontally along Main Corridor to SALIDA Station
+            else if (robotState === "RETURNING_X") {
               if (Math.abs(x - SALIDA_POS.x) <= speed) {
                 x = SALIDA_POS.x;
                 y = SALIDA_POS.y;
                 setRobotState("IDLE");
-                addLog("ARDUINO_RX", `HOME_SALIDA_REACHED | JOB_SUD_${activeJob.sud}_SUCCESS`);
+                addLog("ARDUINO_RX", `WAYPOINT_5_REACHED: HOME_SALIDA | JOB_SUD_${activeJob.sud}_SUCCESS`);
                 setActiveJob(null);
               } else {
                 x += Math.sign(SALIDA_POS.x - x) * speed;
+                y = SALIDA_POS.y;
               }
             }
 
@@ -277,6 +294,7 @@
             setActuatorLevel(prev => {
               if (Math.abs(prev - targetLvl) <= 0.08) {
                 setRobotState("PICKING");
+                setPickingTimer(0);
                 addLog("ACTUATOR", `ELEVATION_COMPLETE | LEVEL_${activeJob.level}`);
                 addLog("STATUS", `EXECUTING_PICKING_MANEUVER`);
                 return targetLvl;
@@ -284,13 +302,15 @@
               return prev + Math.sign(targetLvl - prev) * 0.08;
             });
           } else if (robotState === "PICKING") {
-            // Picking delay simulation
-            setTimeout(() => {
-              if (robotState === "PICKING") {
+            // Synchronous frame counter picking delay to avoid duplicate setTimeout triggers
+            setPickingTimer(prev => {
+              if (prev >= 25) { // 25 ticks * 40ms = 1.0 second delay
                 setRobotState("LOWERING");
                 addLog("STATUS", `PICKING_COMPLETE | RETRACTING_FORK`);
+                return 0;
               }
-            }, 1200);
+              return prev + 1;
+            });
           } else if (robotState === "LOWERING") {
             setActuatorLevel(prev => {
               if (prev <= 1.05) {
@@ -367,7 +387,7 @@
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1">
 
             {/* 2D Interactive Warehouse Floorplan Canvas (Left 7 Cols) */}
-            <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between shadow-lg relative min-h-[580px]">
+            <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between shadow-lg relative min-h-[680px]">
 
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-bold text-slate-300 flex items-center gap-2">
@@ -383,11 +403,11 @@
               </div>
 
               {/* Floorplan 2D Canvas Container */}
-              <div className="relative flex-1 bg-slate-950 border border-slate-800/80 rounded-lg p-2 overflow-hidden select-none">
+              <div className="relative flex-1 bg-slate-950 border border-slate-800/80 rounded-lg p-2 overflow-hidden select-none min-h-[580px]">
 
                 {/* Corridor Paths Background */}
                 {/* Main horizontal corridor at bottom */}
-                <div className="absolute bottom-[8%] left-[5%] right-[5%] h-[10%] bg-slate-900/90 rounded border border-slate-800 flex items-center justify-around text-[10px] text-slate-500 font-mono">
+                <div className="absolute bottom-[2%] left-[3%] right-[3%] h-[12%] bg-slate-900/90 rounded border border-slate-800 flex items-center justify-around text-[10px] text-slate-500 font-mono">
                   <span>PASILLO PRINCIPAL DE TRÁNSITO HORIZONTAL</span>
                 </div>
 
@@ -395,14 +415,14 @@
                 {Object.entries(AISLE_CONFIG).map(([aisleName, config]) => {
                   const ax = aisleXCoords[aisleName];
                   return (
-                    <div key={aisleName} className="absolute top-[8%] bottom-[18%] w-[12%]" style={{ left: `${ax - 6}%` }}>
+                    <div key={aisleName} className="absolute top-[4%] bottom-[15%] w-[13%]" style={{ left: `${ax - 6.5}%` }}>
                       {/* Vertical aisle path background */}
                       <div className="absolute inset-0 bg-slate-900/60 rounded border border-slate-800/60 flex flex-col items-center justify-start pt-1">
                         <span className="text-[10px] font-bold text-slate-400 bg-slate-950 px-1 rounded border border-slate-800">{aisleName}</span>
                       </div>
 
                       {/* Left Racks */}
-                      <div className="absolute top-8 bottom-2 left-0 w-[42%] flex flex-col justify-between">
+                      <div className="absolute top-6 bottom-1 left-0 w-[43%] flex flex-col-reverse justify-between">
                         {config.sides.left.map(sudId => {
                           const info = getSudInfo(sudId);
                           const isSelected = selectedSud === sudId;
@@ -412,7 +432,7 @@
                               key={sudId}
                               onClick={() => setSelectedSud(sudId)}
                               title={`Sud ${sudId} | ${info.aisle} | ${info.rotation}`}
-                              className={`h-[8%] w-full rounded text-[9px] font-mono flex items-center justify-center transition-all ${info.colorClass} ${
+                              className={`h-[9.5%] w-full rounded text-[9px] font-mono flex items-center justify-center transition-all ${info.colorClass} ${
                                 isActiveTarget ? "ring-2 ring-blue-400 ring-offset-1 ring-offset-slate-950 animate-bounce" :
                                 isSelected ? "ring-2 ring-white scale-105 z-10" : "hover:opacity-90"
                               }`}
@@ -424,7 +444,7 @@
                       </div>
 
                       {/* Right Racks */}
-                      <div className="absolute top-8 bottom-2 right-0 w-[42%] flex flex-col justify-between">
+                      <div className="absolute top-6 bottom-1 right-0 w-[43%] flex flex-col-reverse justify-between">
                         {config.sides.right.map(sudId => {
                           const info = getSudInfo(sudId);
                           const isSelected = selectedSud === sudId;
@@ -434,7 +454,7 @@
                               key={sudId}
                               onClick={() => setSelectedSud(sudId)}
                               title={`Sud ${sudId} | ${info.aisle} | ${info.rotation}`}
-                              className={`h-[8%] w-full rounded text-[9px] font-mono flex items-center justify-center transition-all ${info.colorClass} ${
+                              className={`h-[9.5%] w-full rounded text-[9px] font-mono flex items-center justify-center transition-all ${info.colorClass} ${
                                 isActiveTarget ? "ring-2 ring-blue-400 ring-offset-1 ring-offset-slate-950 animate-bounce" :
                                 isSelected ? "ring-2 ring-white scale-105 z-10" : "hover:opacity-90"
                               }`}
@@ -449,7 +469,7 @@
                 })}
 
                 {/* ZONA DE SALIDA (Home Base) */}
-                <div className="absolute bottom-[6%] left-[6%] w-[12%] h-[14%] bg-emerald-950/80 border-2 border-emerald-500 rounded-lg flex flex-col items-center justify-center text-center p-1 shadow-lg shadow-emerald-950/50">
+                <div className="absolute bottom-[2%] left-[4%] w-[13%] h-[12%] bg-emerald-950/90 border-2 border-emerald-500 rounded-lg flex flex-col items-center justify-center text-center p-1 shadow-lg shadow-emerald-950/50 z-20">
                   <span className="text-[10px] font-black text-emerald-400 uppercase tracking-tighter">ZONA DE</span>
                   <span className="text-xs font-black text-emerald-300 uppercase tracking-tight">SALIDA</span>
                   <span className="text-[8px] text-emerald-500 font-mono">(HOME)</span>
