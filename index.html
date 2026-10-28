@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simulador de Almacén Automatizado - Panel de Control & Picking 2D</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            industrial: {
+              900: '#0f172a',
+              800: '#1e293b',
+              700: '#334155',
+              600: '#475569',
+              accent: '#3b82f6',
+              success: '#22c55e',
+              warning: '#eab308',
+              danger: '#ef4444'
+            }
+          },
+          fontFamily: {
+            mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+  <!-- React & ReactDOM CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel Standalone CDN -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    /* Custom Scrollbar for Terminal */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // Mapping 63 satellite positions (Sud 1 to Sud 63) across Pasillos A - E
+    const AISLE_CONFIG = {
+      "Pasillo A": { suds: [1, 2, 3, 4, 5, 6, 7, 8, 9], sides: { left: [1, 2, 3, 4, 5, 6, 7, 8, 9], right: [] } },
+      "Pasillo B": { suds: Array.from({length: 18}, (_, i) => i + 10), sides: { left: [10, 11, 12, 13, 14, 15, 16, 17, 18], right: [19, 20, 21, 22, 23, 24, 25, 26, 27] } },
+      "Pasillo C": { suds: Array.from({length: 18}, (_, i) => i + 28), sides: { left: [28, 29, 30, 31, 32, 33, 34, 35, 36], right: [37, 38, 39, 40, 41, 42, 43, 44, 45] } },
+      "Pasillo D": { suds: [46, 47, 48, 49, 50, 51, 52, 53, 54], sides: { left: [], right: [46, 47, 48, 49, 50, 51, 52, 53, 54] } },
+      "Pasillo E": { suds: [55, 56, 57, 58, 59, 60, 61, 62, 63], sides: { left: [], right: [55, 56, 57, 58, 59, 60, 61, 62, 63] } },
+    };
+
+    // Calculate popularity / rotation score & color for heat map
+    // Red (>50 u., near SALIDA), Orange/Yellow (5-30 u.), Green (<5 u. far back), Grey (unassigned)
+    const getSudInfo = (sudId) => {
+      let aisle = "";
+      let side = "left";
+      let depth = 1; // 1 near SALIDA (bottom), 9 far back (top)
+
+      for (const [aName, config] of Object.entries(AISLE_CONFIG)) {
+        if (config.sides.left.includes(sudId)) {
+          aisle = aName;
+          side = "left";
+          depth = config.sides.left.indexOf(sudId) + 1;
+          break;
+        } else if (config.sides.right.includes(sudId)) {
+          aisle = aName;
+          side = "right";
+          depth = config.sides.right.indexOf(sudId) + 1;
+          break;
+        }
+      }
+
+      // Popularity classification based on depth from SALIDA (depth 1 closest)
+      let rotation = "";
+      let colorClass = "";
+      let bgHex = "";
+      let units = 0;
+
+      if (sudId === 63) { // Example unassigned spot
+        rotation = "Libre / Sin Asignar";
+        colorClass = "bg-slate-700 text-slate-300 border-slate-600";
+        bgHex = "#334155";
+        units = 0;
+      } else if (depth <= 2) {
+        rotation = "Alta Rotación (>50 u.)";
+        colorClass = "bg-red-600 text-white border-red-500 shadow-sm shadow-red-900/50";
+        bgHex = "#dc2626";
+        units = 65 - depth * 5;
+      } else if (depth <= 5) {
+        rotation = "Media Rotación (15-30 u.)";
+        colorClass = "bg-amber-500 text-slate-950 font-semibold border-amber-400";
+        bgHex = "#f59e0b";
+        units = 35 - depth * 4;
+      } else {
+        rotation = "Baja Rotación (<5 u.)";
+        colorClass = "bg-emerald-600 text-white border-emerald-500";
+        bgHex = "#059669";
+        units = Math.max(1, 10 - depth);
+      }
+
+      return { sudId, aisle, side, depth, rotation, colorClass, bgHex, units };
+    };
+
+    function App() {
+      const [selectedSud, setSelectedSud] = useState(14);
+      const [selectedLevel, setSelectedLevel] = useState(2);
+      const [mode, setMode] = useState("AUTOMATIC"); // AUTOMATIC or MANUAL
+      const [robotState, setRobotState] = useState("IDLE"); // IDLE, MOVING_X, MOVING_Y, ELEVATING, PICKING, LOWERING, RETURNING_Y, RETURNING_X, PAUSED
+      const [isPaused, setIsPaused] = useState(false);
+
+      // Robot positional state (percentages 0-100 on 2D canvas)
+      // Home / SALIDA is at bottom-left: x = 12%, y = 88%
+      const SALIDA_POS = { x: 12, y: 88 };
+      const [robotPos, setRobotPos] = useState(SALIDA_POS);
+      const [actuatorLevel, setActuatorLevel] = useState(1.0); // 1.0 (Level 01) to 2.0 (Level 02)
+
+      // Target active job
+      const [activeJob, setActiveJob] = useState(null);
+      const [orderQueue, setOrderQueue] = useState([
+        { sud: 14, level: 2 },
+        { sud: 32, level: 1 },
+        { sud: 50, level: 2 }
+      ]);
+
+      // Serial Logs
+      const [logs, setLogs] = useState([
+        { time: getTimestamp(), sender: "SYSTEM", message: "Panel de Control de Almacén Automatizado iniciado." },
+        { time: getTimestamp(), sender: "ARDUINO_RX", message: "READY_FOR_COMMANDS" }
+      ]);
+
+      const logContainerRef = useRef(null);
+
+      function getTimestamp() {
+        const now = new Date();
+        return now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+      }
+
+      function addLog(sender, message) {
+        setLogs(prev => [...prev.slice(-40), { time: getTimestamp(), sender, message }]);
+      }
+
+      useEffect(() => {
+        if (logContainerRef.current) {
+          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+        }
+      }, [logs]);
+
+      // Aisle X coordinates on canvas (%)
+      const aisleXCoords = {
+        "Pasillo A": 22,
+        "Pasillo B": 38,
+        "Pasillo C": 54,
+        "Pasillo D": 70,
+        "Pasillo E": 86
+      };
+
+      // Get Y position (%) for a given Sud depth (depth 1 bottom y=76%, depth 9 top y=12%)
+      const getSudYCoord = (depth) => {
+        return 76 - (depth - 1) * 7.5;
+      };
+
+      // Start Picking command
+      const startPickingOrder = (sud, level) => {
+        if (robotState !== "IDLE" && robotState !== "PAUSED") return;
+
+        const targetInfo = getSudInfo(sud);
+        setActiveJob({ sud, level, info: targetInfo });
+        setIsPaused(false);
+        setRobotState("MOVING_X");
+
+        addLog("ARDUINO_TX", `CMD_START_PICK | DEST:SUD_${sud} | AISLE:${targetInfo.aisle.toUpperCase().replace(' ', '_')} | LEVEL:${level}`);
+        addLog("ACTUATOR", `SET_TARGET_LEVEL_${level}`);
+      };
+
+      const handlePauseToggle = () => {
+        if (robotState === "IDLE") return;
+        if (isPaused) {
+          setIsPaused(false);
+          addLog("SYSTEM", "RESUMING_OPERATION");
+        } else {
+          setIsPaused(true);
+          addLog("SYSTEM", "OPERATION_PAUSED_BY_OPERATOR");
+        }
+      };
+
+      const handleResetToSalida = () => {
+        setRobotPos(SALIDA_POS);
+        setActuatorLevel(1.0);
+        setRobotState("IDLE");
+        setIsPaused(false);
+        setActiveJob(null);
+        addLog("ARDUINO_TX", "CMD_EMERGENCY_RESET -> RETURN_HOME_SALIDA");
+      };
+
+      const addRandomOrderToQueue = () => {
+        const randSud = Math.floor(Math.random() * 63) + 1;
+        const randLevel = Math.random() > 0.5 ? 2 : 1;
+        setOrderQueue(prev => [...prev, { sud: randSud, level: randLevel }]);
+        addLog("SYSTEM", `ORDER_QUEUED: Sud ${randSud} (Nivel ${randLevel})`);
+      };
+
+      // Frame animation loop
+      useEffect(() => {
+        if (isPaused || robotState === "IDLE" || !activeJob) return;
+
+        const interval = setInterval(() => {
+          const targetAisleX = aisleXCoords[activeJob.info.aisle];
+          const targetSudY = getSudYCoord(activeJob.info.depth);
+          const speed = 1.2;
+
+          setRobotPos(prev => {
+            let { x, y } = prev;
+
+            if (robotState === "MOVING_X") {
+              if (Math.abs(x - targetAisleX) <= speed) {
+                x = targetAisleX;
+                setRobotState("MOVING_Y");
+                addLog("ARDUINO_RX", `MOV_X_COMPLETE | TURN_INTO_${activeJob.info.aisle.toUpperCase().replace(' ', '_')}`);
+              } else {
+                x += Math.sign(targetAisleX - x) * speed;
+              }
+            } else if (robotState === "MOVING_Y") {
+              if (Math.abs(y - targetSudY) <= speed) {
+                y = targetSudY;
+                setRobotState("ELEVATING");
+                addLog("ARDUINO_RX", `POS_REACHED: SUD_${activeJob.sud} | ELEVATING_FORK`);
+              } else {
+                y += Math.sign(targetSudY - y) * speed;
+              }
+            } else if (robotState === "RETURNING_Y") {
+              if (Math.abs(y - SALIDA_POS.y) <= speed) {
+                y = SALIDA_POS.y;
+                setRobotState("RETURNING_X");
+                addLog("ARDUINO_RX", `EXIT_AISLE -> ENTER_MAIN_CORRIDOR`);
+              } else {
+                y += Math.sign(SALIDA_POS.y - y) * speed;
+              }
+            } else if (robotState === "RETURNING_X") {
+              if (Math.abs(x - SALIDA_POS.x) <= speed) {
+                x = SALIDA_POS.x;
+                y = SALIDA_POS.y;
+                setRobotState("IDLE");
+                addLog("ARDUINO_RX", `HOME_SALIDA_REACHED | JOB_SUD_${activeJob.sud}_SUCCESS`);
+                setActiveJob(null);
+              } else {
+                x += Math.sign(SALIDA_POS.x - x) * speed;
+              }
+            }
+
+            return { x, y };
+          });
+
+          // Actuator elevation state machine
+          if (robotState === "ELEVATING") {
+            const targetLvl = parseFloat(activeJob.level);
+            setActuatorLevel(prev => {
+              if (Math.abs(prev - targetLvl) <= 0.08) {
+                setRobotState("PICKING");
+                addLog("ACTUATOR", `ELEVATION_COMPLETE | LEVEL_${activeJob.level}`);
+                addLog("STATUS", `EXECUTING_PICKING_MANEUVER`);
+                return targetLvl;
+              }
+              return prev + Math.sign(targetLvl - prev) * 0.08;
+            });
+          } else if (robotState === "PICKING") {
+            // Picking delay simulation
+            setTimeout(() => {
+              if (robotState === "PICKING") {
+                setRobotState("LOWERING");
+                addLog("STATUS", `PICKING_COMPLETE | RETRACTING_FORK`);
+              }
+            }, 1200);
+          } else if (robotState === "LOWERING") {
+            setActuatorLevel(prev => {
+              if (prev <= 1.05) {
+                setRobotState("RETURNING_Y");
+                addLog("ACTUATOR", `FORK_LOWERED_LEVEL_1 | START_RETURN_HOME`);
+                return 1.0;
+              }
+              return prev - 0.08;
+            });
+          }
+
+        }, 40);
+
+        return () => clearInterval(interval);
+      }, [robotState, isPaused, activeJob]);
+
+      // Handle Automatic queue processing
+      useEffect(() => {
+        if (mode === "AUTOMATIC" && robotState === "IDLE" && orderQueue.length > 0 && !activeJob) {
+          const nextOrder = orderQueue[0];
+          setOrderQueue(prev => prev.slice(1));
+          setSelectedSud(nextOrder.sud);
+          setSelectedLevel(nextOrder.level);
+          startPickingOrder(nextOrder.sud, nextOrder.level);
+        }
+      }, [mode, robotState, orderQueue, activeJob]);
+
+      const currentSudInfo = getSudInfo(selectedSud);
+
+      return (
+        <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 p-4 gap-4">
+          {/* Header Bar */}
+          <header className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4 shadow-lg">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded-lg">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+                </svg>
+              </div>
+              <div>
+                <h1 className="text-xl font-bold tracking-tight text-white">SIMULADOR DE PICKING AUTOMATIZADO 2D</h1>
+                <p className="text-xs text-slate-400">Control de Carrito Robot Robotizado & Sistema de Almacén Satélite</p>
+              </div>
+            </div>
+
+            {/* Status Indicators */}
+            <div className="flex items-center gap-6 bg-slate-950 px-4 py-2 rounded-lg border border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">Batería:</span>
+                <span className="text-sm font-semibold text-emerald-400 flex items-center gap-1">
+                  ⚡ 98%
+                </span>
+              </div>
+              <div className="h-4 w-px bg-slate-800"></div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">Sensores:</span>
+                <span className="text-sm font-semibold text-blue-400">OK (LiDAR/Enconders)</span>
+              </div>
+              <div className="h-4 w-px bg-slate-800"></div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">Estado Robot:</span>
+                <span className={`text-xs px-2 py-0.5 rounded font-bold uppercase tracking-wider ${
+                  robotState === "IDLE" ? "bg-slate-800 text-slate-300" :
+                  robotState === "PICKING" ? "bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse" :
+                  "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                }`}>
+                  {robotState}
+                </span>
+              </div>
+            </div>
+          </header>
+
+          {/* Main Content Layout */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1">
+
+            {/* 2D Interactive Warehouse Floorplan Canvas (Left 7 Cols) */}
+            <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between shadow-lg relative min-h-[580px]">
+
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-bold text-slate-300 flex items-center gap-2">
+                  🗺️ PLANO DEL ALMACÉN (PASILLOS A - E & SUD 1-63)
+                </span>
+                {/* Popularity Legend */}
+                <div className="flex items-center gap-3 text-xs">
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-600"></span> Alta (&gt;50u)</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Media (15-30u)</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-600"></span> Baja (&lt;5u)</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-slate-700"></span> Libre</span>
+                </div>
+              </div>
+
+              {/* Floorplan 2D Canvas Container */}
+              <div className="relative flex-1 bg-slate-950 border border-slate-800/80 rounded-lg p-2 overflow-hidden select-none">
+
+                {/* Corridor Paths Background */}
+                {/* Main horizontal corridor at bottom */}
+                <div className="absolute bottom-[8%] left-[5%] right-[5%] h-[10%] bg-slate-900/90 rounded border border-slate-800 flex items-center justify-around text-[10px] text-slate-500 font-mono">
+                  <span>PASILLO PRINCIPAL DE TRÁNSITO HORIZONTAL</span>
+                </div>
+
+                {/* Aisles rendering */}
+                {Object.entries(AISLE_CONFIG).map(([aisleName, config]) => {
+                  const ax = aisleXCoords[aisleName];
+                  return (
+                    <div key={aisleName} className="absolute top-[8%] bottom-[18%] w-[12%]" style={{ left: `${ax - 6}%` }}>
+                      {/* Vertical aisle path background */}
+                      <div className="absolute inset-0 bg-slate-900/60 rounded border border-slate-800/60 flex flex-col items-center justify-start pt-1">
+                        <span className="text-[10px] font-bold text-slate-400 bg-slate-950 px-1 rounded border border-slate-800">{aisleName}</span>
+                      </div>
+
+                      {/* Left Racks */}
+                      <div className="absolute top-8 bottom-2 left-0 w-[42%] flex flex-col justify-between">
+                        {config.sides.left.map(sudId => {
+                          const info = getSudInfo(sudId);
+                          const isSelected = selectedSud === sudId;
+                          const isActiveTarget = activeJob?.sud === sudId;
+                          return (
+                            <button
+                              key={sudId}
+                              onClick={() => setSelectedSud(sudId)}
+                              title={`Sud ${sudId} | ${info.aisle} | ${info.rotation}`}
+                              className={`h-[8%] w-full rounded text-[9px] font-mono flex items-center justify-center transition-all ${info.colorClass} ${
+                                isActiveTarget ? "ring-2 ring-blue-400 ring-offset-1 ring-offset-slate-950 animate-bounce" :
+                                isSelected ? "ring-2 ring-white scale-105 z-10" : "hover:opacity-90"
+                              }`}
+                            >
+                              S{sudId}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Right Racks */}
+                      <div className="absolute top-8 bottom-2 right-0 w-[42%] flex flex-col justify-between">
+                        {config.sides.right.map(sudId => {
+                          const info = getSudInfo(sudId);
+                          const isSelected = selectedSud === sudId;
+                          const isActiveTarget = activeJob?.sud === sudId;
+                          return (
+                            <button
+                              key={sudId}
+                              onClick={() => setSelectedSud(sudId)}
+                              title={`Sud ${sudId} | ${info.aisle} | ${info.rotation}`}
+                              className={`h-[8%] w-full rounded text-[9px] font-mono flex items-center justify-center transition-all ${info.colorClass} ${
+                                isActiveTarget ? "ring-2 ring-blue-400 ring-offset-1 ring-offset-slate-950 animate-bounce" :
+                                isSelected ? "ring-2 ring-white scale-105 z-10" : "hover:opacity-90"
+                              }`}
+                            >
+                              S{sudId}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* ZONA DE SALIDA (Home Base) */}
+                <div className="absolute bottom-[6%] left-[6%] w-[12%] h-[14%] bg-emerald-950/80 border-2 border-emerald-500 rounded-lg flex flex-col items-center justify-center text-center p-1 shadow-lg shadow-emerald-950/50">
+                  <span className="text-[10px] font-black text-emerald-400 uppercase tracking-tighter">ZONA DE</span>
+                  <span className="text-xs font-black text-emerald-300 uppercase tracking-tight">SALIDA</span>
+                  <span className="text-[8px] text-emerald-500 font-mono">(HOME)</span>
+                </div>
+
+                {/* Animated Picking Robot Cart SVG */}
+                <div
+                  className="absolute w-8 h-8 -ml-4 -mt-4 transition-all duration-75 z-30 flex items-center justify-center"
+                  style={{ left: `${robotPos.x}%`, top: `${robotPos.y}%` }}
+                >
+                  <div className={`relative w-full h-full rounded-lg border-2 flex flex-col items-center justify-center shadow-xl ${
+                    robotState === "PICKING" ? "bg-amber-500 border-amber-300 text-slate-950 animate-pulse scale-125" : "bg-blue-600 border-blue-300 text-white"
+                  }`}>
+                    <span className="text-[10px] font-black leading-none">🤖</span>
+                    <span className="text-[8px] font-mono font-bold leading-none">L{Math.round(actuatorLevel)}</span>
+
+                    {/* Actuator Fork Mast Visual Representation */}
+                    <div
+                      className="absolute -top-3 w-1.5 bg-amber-400 rounded-t transition-all duration-100 border border-amber-200"
+                      style={{ height: `${actuatorLevel * 8}px` }}
+                    ></div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Right Controls & Terminal (Right 5 Cols) */}
+            <div className="lg:col-span-5 flex flex-col gap-4">
+
+              {/* Order Command Panel */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col gap-3">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                  <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                    🎛️ PANEL DE CONTROL DE PEDIDOS
+                  </h2>
+                  <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs font-semibold">
+                    <button
+                      onClick={() => setMode("AUTOMATIC")}
+                      className={`px-2 py-0.5 rounded transition ${mode === "AUTOMATIC" ? "bg-blue-600 text-white" : "text-slate-400"}`}
+                    >
+                      AUTO
+                    </button>
+                    <button
+                      onClick={() => setMode("MANUAL")}
+                      className={`px-2 py-0.5 rounded transition ${mode === "MANUAL" ? "bg-blue-600 text-white" : "text-slate-400"}`}
+                    >
+                      MANUAL
+                    </button>
+                  </div>
+                </div>
+
+                {/* Sud Selector & Level Toggle */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">Ubicación Destino:</label>
+                    <select
+                      value={selectedSud}
+                      onChange={(e) => setSelectedSud(Number(e.target.value))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
+                    >
+                      {Array.from({length: 63}, (_, i) => i + 1).map(id => {
+                        const info = getSudInfo(id);
+                        return (
+                          <option key={id} value={id}>
+                            Sud {id} ({info.aisle})
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-400 mb-1 block">Nivel de Horquilla:</label>
+                    <div className="grid grid-cols-2 gap-1 bg-slate-950 p-1 rounded-lg border border-slate-700">
+                      <button
+                        onClick={() => setSelectedLevel(1)}
+                        className={`py-1 text-xs rounded font-bold transition ${selectedLevel === 1 ? "bg-emerald-600 text-white" : "text-slate-400"}`}
+                      >
+                        Nivel 01
+                      </button>
+                      <button
+                        onClick={() => setSelectedLevel(2)}
+                        className={`py-1 text-xs rounded font-bold transition ${selectedLevel === 2 ? "bg-emerald-600 text-white" : "text-slate-400"}`}
+                      >
+                        Nivel 02
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Selected Location Summary Box */}
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 flex items-center justify-between text-xs">
+                  <div>
+                    <span className="text-slate-400 block">Detalles de la Posición:</span>
+                    <span className="font-bold text-blue-400">Sud {selectedSud} • {currentSudInfo.aisle} • Lado {currentSudInfo.side}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-slate-400 block">Clasificación:</span>
+                    <span className={`px-2 py-0.5 rounded font-bold inline-block text-[10px] ${currentSudInfo.colorClass}`}>
+                      {currentSudInfo.rotation}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Control Action Buttons */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => startPickingOrder(selectedSud, selectedLevel)}
+                    disabled={robotState !== "IDLE" && robotState !== "PAUSED"}
+                    className="col-span-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 transition shadow-lg shadow-emerald-950/50"
+                  >
+                    ► INICIAR PICKING
+                  </button>
+                  <button
+                    onClick={handlePauseToggle}
+                    className="bg-amber-600 hover:bg-amber-500 text-white font-semibold py-2 px-3 rounded-lg text-xs flex items-center justify-center gap-1 transition"
+                  >
+                    {isPaused ? "▶ Reanudar" : "⏸ Pausa"}
+                  </button>
+                  <button
+                    onClick={handleResetToSalida}
+                    className="bg-red-600 hover:bg-red-500 text-white font-semibold py-2 px-3 rounded-lg text-xs flex items-center justify-center gap-1 transition"
+                  >
+                    ↺ Reset a Salida
+                  </button>
+                </div>
+
+                {/* Order Queue */}
+                <div className="border-t border-slate-800 pt-2">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-slate-300">Cola de Pedidos Automáticos:</span>
+                    <button onClick={addRandomOrderToQueue} className="text-[10px] text-blue-400 hover:underline">
+                      + Agergar Aleatorio
+                    </button>
+                  </div>
+                  <div className="flex gap-1.5 overflow-x-auto pb-1">
+                    {orderQueue.length === 0 ? (
+                      <span className="text-xs text-slate-500 italic">Sin pedidos en cola.</span>
+                    ) : (
+                      orderQueue.map((item, idx) => (
+                        <span key={idx} className="bg-slate-950 border border-slate-800 text-slate-300 px-2 py-1 rounded text-[10px] font-mono whitespace-nowrap">
+                          Sud {item.sud} (L{item.level})
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Virtual Serial Terminal (Arduino Log Monitor) */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg flex-1 flex flex-col min-h-[240px]">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
+                    <h3 className="text-xs font-bold text-slate-300 font-mono">MONITOR SERIAL VIRTUAL (ARDUINO UART)</h3>
+                  </div>
+                  <button
+                    onClick={() => setLogs([])}
+                    className="text-[10px] text-slate-500 hover:text-slate-300 font-mono"
+                  >
+                    [LIMPIAR LOGS]
+                  </button>
+                </div>
+
+                {/* Terminal Window */}
+                <div
+                  ref={logContainerRef}
+                  className="flex-1 bg-slate-950 border border-slate-800/80 rounded-lg p-3 font-mono text-[11px] leading-relaxed overflow-y-auto flex flex-col gap-1 text-slate-300 select-text"
+                >
+                  {logs.map((log, index) => (
+                    <div key={index} className="flex gap-2">
+                      <span className="text-slate-500">[{log.time}]</span>
+                      <span className={`font-bold ${
+                        log.sender === "ARDUINO_TX" ? "text-blue-400" :
+                        log.sender === "ARDUINO_RX" ? "text-emerald-400" :
+                        log.sender === "ACTUATOR" ? "text-amber-400" : "text-purple-400"
+                      }`}>
+                        [{log.sender}]
+                      </span>
+                      <span className="text-slate-200">{log.message}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
