@@ -58,10 +58,10 @@
     .bg-safety-stripes {
       background: repeating-linear-gradient(
         45deg,
-        rgba(16, 185, 129, 0.15),
-        rgba(16, 185, 129, 0.15) 10px,
-        rgba(15, 23, 42, 0.8) 10px,
-        rgba(15, 23, 42, 0.8) 20px
+        rgba(16, 185, 129, 0.20),
+        rgba(16, 185, 129, 0.20) 10px,
+        rgba(15, 23, 42, 0.85) 10px,
+        rgba(15, 23, 42, 0.85) 20px
       );
     }
   </style>
@@ -147,7 +147,7 @@
       ]);
 
       const [logs, setLogs] = useState([
-        { time: getTimestamp(), sender: "SYSTEM", message: "Warehouse Command Center initialized. Single-canvas coordinate space loaded." },
+        { time: getTimestamp(), sender: "SYSTEM", message: "Warehouse Command Center initialized. Grid matrix 1-63 perfectly aligned." },
         { time: getTimestamp(), sender: "ARDUINO_RX", message: "AMR_AGV_ONLINE | LIDAR_OK | BATTERY_98%" }
       ]);
 
@@ -179,7 +179,7 @@
 
       // Get Sud Y coordinate (%) inside single canvas space (depth 1 bottom y=78%, depth 9 top y=14%)
       const getSudYCoord = (depth) => {
-        return 78 - (depth - 1) * 8.0;
+        return 78 - (depth - 1) * 7.6;
       };
 
       const startPickingOrder = (sud, level) => {
@@ -338,6 +338,28 @@
 
       const currentSudInfo = getSudInfo(selectedSud);
 
+      // Render satellite rack cell with strict grid matrix alignment
+      const renderRackCell = (sudId) => {
+        if (!sudId) return <div className="w-full h-full opacity-0 pointer-events-none"></div>;
+        const info = getSudInfo(sudId);
+        const isSelected = selectedSud === sudId;
+        const isActiveTarget = activeJob?.sud === sudId;
+
+        return (
+          <button
+            key={sudId}
+            onClick={() => setSelectedSud(sudId)}
+            title={`Sud ${sudId} | ${info.aisle} | ${info.rotation}`}
+            className={`w-full h-full rounded border text-[9px] font-mono font-bold flex items-center justify-center transition-all ${info.colorClass} ${
+              isActiveTarget ? "ring-2 ring-cyan-300 ring-offset-1 ring-offset-slate-950 animate-bounce z-20" :
+              isSelected ? "ring-2 ring-white scale-105 z-10" : "hover:opacity-90 hover:scale-105"
+            }`}
+          >
+            S{sudId}
+          </button>
+        );
+      };
+
       return (
         <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 p-4 gap-4">
 
@@ -356,7 +378,7 @@
                   <h1 className="text-xl font-extrabold tracking-tight text-white font-mono">WAREHOUSE COMMAND CENTER</h1>
                   <span className="text-[10px] bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-2 py-0.5 rounded font-mono font-bold">2D AMR SIMULATOR</span>
                 </div>
-                <p className="text-xs text-slate-400">Control de Nave Industrial Unificada • Sistema de Picking Automatizado Satélite (Sud 1 - 63)</p>
+                <p className="text-xs text-slate-400">Matriz de Nave Industrial Unificada (Sud 1 - 63) • Alineación de Celdas Perfeccionada</p>
               </div>
             </div>
 
@@ -397,7 +419,7 @@
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse"></span>
                   <span className="text-xs font-bold text-slate-200 font-mono uppercase tracking-wider">
-                    PLANO UNIFICADO DE NAVE INDUSTRIAL (ESPACIO CONTINUO DE COORDENADAS)
+                    PLANO UNIFICADO Y MATRIZ MATRICIAL DE SATÉLITES (SUD 1 - SUD 63)
                   </span>
                 </div>
 
@@ -411,7 +433,7 @@
               </div>
 
               {/* SINGLE BOUNDING BOX CANVAS CONTAINER */}
-              <div className="relative flex-1 bg-slate-950 border-2 border-slate-700/80 rounded-xl p-3 overflow-hidden select-none shadow-inner min-h-[580px]">
+              <div className="relative flex-1 bg-slate-950 border-2 border-slate-700/80 rounded-xl p-3 overflow-hidden select-none shadow-inner min-h-[580px] flex flex-col justify-between">
 
                 {/* Technical Grid Guidance Background (CAD Style) */}
                 <svg className="absolute inset-0 w-full h-full opacity-15 pointer-events-none" xmlns="http://www.w3.org/2000/svg">
@@ -423,71 +445,58 @@
                   <rect width="100%" height="100%" fill="url(#grid)" />
                 </svg>
 
-                {/* Main Horizontal Corridor Transit Lane (Bottom Floor Marking) */}
-                <div className="absolute bottom-[2%] left-[2%] right-[2%] h-[12%] bg-slate-900/90 rounded-lg border-2 border-dashed border-slate-700 flex items-center justify-around text-[10px] text-slate-500 font-mono tracking-widest z-0">
-                  <span>◄◄ CARRIL PRINCIPAL DE TRÁNSITO HORIZONTAL DEL ROBOT AMR ►►</span>
+                {/* AISLES HEADER BAND (Pasillos A - E Labels) */}
+                <div className="relative z-10 grid grid-cols-5 gap-2 text-center pt-1 pb-2 font-mono text-[11px] font-bold">
+                  {Object.keys(AISLE_CONFIG).map((aisle) => (
+                    <div key={aisle} className="bg-slate-900 border border-cyan-800/80 text-cyan-400 py-1 rounded shadow-sm">
+                      {aisle}
+                    </div>
+                  ))}
                 </div>
 
-                {/* Unified Aisles & Racks Placement inside Single Canvas */}
-                {Object.entries(AISLE_CONFIG).map(([aisleName, config]) => {
-                  const ax = aisleXCoords[aisleName];
-                  return (
-                    <div key={aisleName} className="absolute top-[4%] bottom-[15%] w-[13%]" style={{ left: `${ax - 6.5}%` }}>
+                {/* RACK GRID MATRIX (Depths 9 down to 1 - Perfect horizontal & vertical alignment) */}
+                <div className="relative z-10 flex-1 grid grid-rows-9 gap-1.5 my-2">
+                  {[9, 8, 7, 6, 5, 4, 3, 2, 1].map((depthRow) => (
+                    <div key={depthRow} className="grid grid-cols-5 gap-2 items-center">
 
-                      {/* Dashed Guidance Lines for Vertical AMR Corridor */}
-                      <div className="absolute inset-0 border-x-2 border-dashed border-cyan-900/40 bg-slate-900/40 rounded-lg flex flex-col items-center justify-start pt-1">
-                        <span className="text-[10px] font-bold text-cyan-400 bg-slate-950 px-1.5 py-0.5 rounded border border-cyan-800/80 font-mono shadow-sm">
-                          {aisleName}
-                        </span>
+                      {/* Pasillo A (Left Rack: Sud depthRow, Right: Empty) */}
+                      <div className="grid grid-cols-2 gap-1 h-full">
+                        {renderRackCell(AISLE_CONFIG["Pasillo A"].sides.left[depthRow - 1])}
+                        {renderRackCell(null)}
                       </div>
 
-                      {/* Left Rack Block */}
-                      <div className="absolute top-8 bottom-1 left-0 w-[42%] flex flex-col-reverse justify-between">
-                        {config.sides.left.map(sudId => {
-                          const info = getSudInfo(sudId);
-                          const isSelected = selectedSud === sudId;
-                          const isActiveTarget = activeJob?.sud === sudId;
-                          return (
-                            <button
-                              key={sudId}
-                              onClick={() => setSelectedSud(sudId)}
-                              title={`Sud ${sudId} | ${info.aisle} | ${info.rotation}`}
-                              className={`h-[9.5%] w-full rounded text-[9px] font-mono font-bold flex items-center justify-center transition-all ${info.colorClass} ${
-                                isActiveTarget ? "ring-2 ring-cyan-300 ring-offset-1 ring-offset-slate-950 animate-bounce z-20" :
-                                isSelected ? "ring-2 ring-white scale-105 z-10" : "hover:opacity-90 hover:scale-105"
-                              }`}
-                            >
-                              S{sudId}
-                            </button>
-                          );
-                        })}
+                      {/* Pasillo B (Left Rack: Sud 10-18, Right Rack: Sud 19-27) */}
+                      <div className="grid grid-cols-2 gap-1 h-full">
+                        {renderRackCell(AISLE_CONFIG["Pasillo B"].sides.left[depthRow - 1])}
+                        {renderRackCell(AISLE_CONFIG["Pasillo B"].sides.right[depthRow - 1])}
                       </div>
 
-                      {/* Right Rack Block */}
-                      <div className="absolute top-8 bottom-1 right-0 w-[42%] flex flex-col-reverse justify-between">
-                        {config.sides.right.map(sudId => {
-                          const info = getSudInfo(sudId);
-                          const isSelected = selectedSud === sudId;
-                          const isActiveTarget = activeJob?.sud === sudId;
-                          return (
-                            <button
-                              key={sudId}
-                              onClick={() => setSelectedSud(sudId)}
-                              title={`Sud ${sudId} | ${info.aisle} | ${info.rotation}`}
-                              className={`h-[9.5%] w-full rounded text-[9px] font-mono font-bold flex items-center justify-center transition-all ${info.colorClass} ${
-                                isActiveTarget ? "ring-2 ring-cyan-300 ring-offset-1 ring-offset-slate-950 animate-bounce z-20" :
-                                isSelected ? "ring-2 ring-white scale-105 z-10" : "hover:opacity-90 hover:scale-105"
-                              }`}
-                            >
-                              S{sudId}
-                            </button>
-                          );
-                        })}
+                      {/* Pasillo C (Left Rack: Sud 28-36, Right Rack: Sud 37-45) */}
+                      <div className="grid grid-cols-2 gap-1 h-full">
+                        {renderRackCell(AISLE_CONFIG["Pasillo C"].sides.left[depthRow - 1])}
+                        {renderRackCell(AISLE_CONFIG["Pasillo C"].sides.right[depthRow - 1])}
+                      </div>
+
+                      {/* Pasillo D (Left: Empty, Right Rack: Sud 46-54) */}
+                      <div className="grid grid-cols-2 gap-1 h-full">
+                        {renderRackCell(null)}
+                        {renderRackCell(AISLE_CONFIG["Pasillo D"].sides.right[depthRow - 1])}
+                      </div>
+
+                      {/* Pasillo E (Left: Empty, Right Rack: Sud 55-63) */}
+                      <div className="grid grid-cols-2 gap-1 h-full">
+                        {renderRackCell(null)}
+                        {renderRackCell(AISLE_CONFIG["Pasillo E"].sides.right[depthRow - 1])}
                       </div>
 
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
+
+                {/* Main Horizontal Corridor Transit Lane (Bottom Floor Marking) */}
+                <div className="relative z-0 h-[10%] bg-slate-900/90 rounded-lg border-2 border-dashed border-slate-700 flex items-center justify-around text-[10px] text-slate-500 font-mono tracking-widest mt-1">
+                  <span>◄◄ CARRIL PRINCIPAL DE TRÁNSITO HORIZONTAL DEL ROBOT AMR ►►</span>
+                </div>
 
                 {/* ZONA DE SALIDA (Home Charging Station with Industrial Safety Stripes) */}
                 <div className="absolute bottom-[2%] left-[2%] w-[14%] h-[12%] bg-safety-stripes border-2 border-emerald-500 rounded-xl flex flex-col items-center justify-center text-center p-1 shadow-lg shadow-emerald-950/60 z-20">
